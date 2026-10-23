@@ -534,6 +534,22 @@ func (s *Sandbox) RemoveProcess(ctx context.Context, id string) error {
 	return c.RemoveProcess(ctx, id)
 }
 
+func (s *Sandbox) DialPort(ctx context.Context, port int) (*agent.Tunnel, error) {
+	c, err := s.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.DialPort(ctx, port)
+}
+
+func (s *Sandbox) Ports(ctx context.Context) (sandbox.PortList, error) {
+	c, err := s.conn(ctx)
+	if err != nil {
+		return sandbox.PortList{}, err
+	}
+	return c.Ports(ctx)
+}
+
 func (s *Sandbox) execViaRunsc(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	args := req.Args
 	if req.Dir != "" || len(req.Env) > 0 {

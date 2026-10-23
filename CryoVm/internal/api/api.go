@@ -150,6 +150,7 @@ const (
 	CodeChecksum    = "checksum"
 	CodeTimeout     = "timeout"
 	CodeInternal    = "internal"
+	CodeRefused     = "refused" // nothing listens on the port asked for
 )
 
 // A file download's checksum is only known once the body has been sent, so
@@ -166,6 +167,26 @@ const (
 // the client; shell_ready, pty_out, detached, shell_exit and error from the
 // daemon.
 const ShellProtocol = "sbx-shell"
+
+// PortProtocol is the protocol name in the Upgrade header for a connection
+// to a port inside a sandbox. After the 101 response, the connection
+// carries the raw bytes of a TCP connection to that port, both ways, with
+// no framing, until both sides have closed; either may half-close first.
+const PortProtocol = "sbx-port"
+
+// PortInfo is one TCP socket listening inside a sandbox.
+type PortInfo struct {
+	Port    int    `json:"port"`
+	Addr    string `json:"addr"`              // what it's bound to; 0.0.0.0 and :: mean every address
+	PID     int    `json:"pid,omitempty"`     // the process holding it, when the agent could tell
+	Command string `json:"command,omitempty"` // that process's command line
+}
+
+// PortList is a sandbox's listening sockets, lowest port first.
+type PortList struct {
+	Ports     []PortInfo `json:"ports"`
+	Truncated bool       `json:"truncated,omitempty"`
+}
 
 type ProcStartRequest struct {
 	Args []string `json:"args"`

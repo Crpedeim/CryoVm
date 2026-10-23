@@ -6,9 +6,11 @@ Each agent gets its own isolated Linux machine, with a filesystem, terminal sess
 processes and a headless browser, which it drives as **MCP tools**. The machine persists: when
 nobody uses it, it **checkpoints itself to S3-compatible storage** and stops costing anything but
 disk; the next request **wakes it with its programs and terminals exactly as they were**. It can
-**fork** while running, into copies that each carry on independently. A sandbox with a network
-gets a namespace of its own, with all traffic forced through an egress proxy that decides, per
-sandbox, what may be reached, and records every decision in a tamper-evident audit chain.
+**fork** while running, into copies that each carry on independently. What it builds, a person can
+see: **a server it starts inside is forwarded to the host**, through the sandbox's agent rather
+than its network, so it works with no network at all, and a request wakes it. A sandbox with a
+network gets a namespace of its own, with all traffic forced through an egress proxy that decides,
+per sandbox, what may be reached, and records every decision in a tamper-evident audit chain.
 
 Isolation comes from **gVisor** by default, behind an interface that also takes a Firecracker
 backend.
@@ -25,7 +27,7 @@ backend.
   pair of steps that save or delete a checkpoint, and twenty real `kill -9`s were run against the
   real binaries and object store. No run left a checkpoint claimed that wasn't there, or storage
   that nothing claimed.
-- **314 tests** in 17 packages, under the race detector, as root and as an unprivileged user; **34
+- **342 tests** in 17 packages, under the race detector, as root and as an unprivileged user; **35
   of them run against real gVisor**. Each feature was also checked by deliberately breaking it and
   confirming a test fails.
 
@@ -67,6 +69,9 @@ S=$(sbx create -net)                     # a sandbox with a network; prints its 
 sbx exec $S -- python3 -c 'print(6*7)'
 sbx shell $S                             # an interactive shell; Ctrl+] detaches, the session lives on
 sbx start $S -- sh -c 'i=0; while :; do i=$((i+1)); echo $i; sleep 1; done'
+sbx start $S -- python3 -m http.server 8000   # a web server, as an agent would start one
+sbx ports $S                             # what listens inside, and which process
+sbx forward $S 8000                      # open http://127.0.0.1:8000 here; Ctrl+C stops forwarding
 sbx checkpoint $S                        # paused: its whole state saved, nothing running
 sbx resume $S                            # the counter carries on where it was
 sbx fork -count 3 $S                     # three running copies; prints their IDs
@@ -80,7 +85,8 @@ created the first time and reused after, sleeping when idle and waking when used
 claude mcp add sbx -- /usr/local/bin/sbx-mcp -sandbox agent -create -image browser
 ```
 
-(Without a browser image, use `-net` instead of `-image browser`.)
+(Without a browser image, use `-net` instead of `-image browser`.) When the agent builds something
+with a web interface, its `forward_port` tool hands it a URL on your machine to give you.
 
 ## Architecture
 
@@ -131,10 +137,10 @@ Unix socket shared into the sandbox, through a `Transport` interface (Firecracke
 The protocol is **length-prefixed JSON frames**: a 4-byte length, then one message carrying a type
 and a request ID, so many requests share one connection. JSON keeps every frame readable while
 debugging; the length prefix makes boundaries unambiguous. Frames are capped at 1 MiB, so a broken
-or hostile peer can't make the other side allocate without bound. There are 51 message types:
+or hostile peer can't make the other side allocate without bound. There are 58 message types:
 exec with streamed output and exit codes; file transfers in chunks with a checksum, flow-controlled
 by acknowledgements with at most 2 MiB in flight; directory listings; terminal sessions; background
-processes; and identity.
+processes; port tunnels; and identity.
 
 ### Terminals and background processes
 
@@ -262,14 +268,47 @@ Every decision, allowed or refused, goes into the audit chain.
 hash covers its content and the previous entry's hash, so `sbx audit -verify` finds any entry
 deleted, reordered or edited.
 
+### Port forwarding: seeing what an agent built
+
+An agent that builds a web app starts its server inside the sandbox. `sbx forward` serves that port
+on the host, the way `ssh -L` does, so a person can open it in a browser; through MCP, the
+`forward_port` tool does the same and hands the agent the URL to pass on.
+
+**It goes through the agent, not the network.** Each local connection becomes one request to the
+daemon, upgraded (HTTP 101) to a raw byte stream; the daemon has the sandbox's agent connect to the
+port on the sandbox's own loopback, and the bytes travel as frames over the agent's connection,
+flow-controlled each way like a terminal's. So it reaches a server listening on localhost alone, as
+most development servers do by default; it works in a sandbox with no network at all; and the
+default-deny rules stay as they are, since nothing comes in through the network. If 127.0.0.1
+refuses, the agent tries ::1 (Node may listen there alone), then any address a listening socket is
+bound to.
+
+**It's a TCP proxy, not an HTTP one,** so anything over TCP works, with TCP's half-close carried end
+to end: a client can send its request, close its side, and still get the whole answer. The two
+directions run independently: a server that writes while it reads is never held up by its own
+output, and a tunnel nobody reads holds up only itself, never the agent's other streams.
+
+**It counts as use.** A connection to a sleeping sandbox wakes it first, so a preview left open in a
+browser still works after the sandbox has napped; an open connection keeps it awake, as an attached
+shell does; and every connection goes into the audit chain, opened and closed, with its bytes each
+way. On real gVisor (the integration test, run on a 4-CPU cloud VM rather than the benchmark machine
+below), a page through the forward took 37 ms, and 258 ms when the request first had to wake the
+sandbox and its restored server answered.
+
+`sbx ports` lists what listens inside, from the kernel's socket tables (gVisor keeps Linux's
+`/proc/net/tcp`), with the process holding each socket. A browser opening a forwarded address
+before anything listens there gets a page saying so, not an empty response. A sandbox keeps the
+agent it was created with, so the host checks the agent's version first: a sandbox made by an
+earlier sbx says so at once, instead of leaving the request to wait.
+
 ### MCP: tools written for a model
 
 ![One shell call through MCP](docs/diagrams/mcp-shell.png)
 
-`sbx-mcp` speaks MCP over stdio (JSON-RPC, written from the specification) and offers nine tools:
-`shell`, `read_file`, `write_file`, `list_files`, `start_process`, `process_logs`, `fork`,
-`browse` and `sandbox_info`. **No tool takes a sandbox ID**: the session is bound to one sandbox
-when it starts, so no tool can reach another.
+`sbx-mcp` speaks MCP over stdio (JSON-RPC, written from the specification) and offers ten tools:
+`shell`, `read_file`, `write_file`, `list_files`, `start_process`, `process_logs`,
+`forward_port`, `fork`, `browse` and `sandbox_info`. **No tool takes a sandbox ID**: the session is
+bound to one sandbox when it starts, so no tool can reach another.
 
 `shell` runs commands in a **persistent** session, so `cd`, variables and activated environments
 carry over. A terminal has no "command finished" signal, so each command is followed by a marker
@@ -285,6 +324,8 @@ are decoded (127 is "command not found"; 137 says whether the memory guard did i
 numbers), network refusals are explained by the sandbox's actual policy, and `exit` in the
 persistent shell says what it cost. `browse` loads a page in Chromium inside the sandbox, so the
 proxy's policy applies, and returns its text and, optionally, its screenshot as an image.
+`forward_port` returns a URL on the user's machine, with the same port number when it's free, that
+lasts for the session; if nothing listens on the port yet, it says so and names what does.
 
 ## Design decisions and their trade-offs
 
@@ -301,6 +342,7 @@ proxy's policy applies, and returns its text and, optionally, its screenshot as 
 | Check every resolved address; connect to the checked one | Defeats DNS rebinding and smuggled private addresses | The proxy does its own name resolution |
 | `O_DIRECT` only above 40% of the memory limit | Prevents the checkpoint OOM where it can happen | Small checkpoints would be about 20 ms slower if always direct |
 | Detach the MCP shell between calls | An agent's sandbox can still sleep | About 5 ms more per call, to reattach |
+| Forward ports through the agent, not the network | Reaches servers on the sandbox's localhost; works without a network; opens nothing in the firewall | A connection carries tens of MB/s, the JSON framing's speed, not a socket's |
 | SQLite `synchronous=NORMAL` | Survives any process crash; one fsync less per commit | Durability across power loss, which checkpoint images don't have either |
 
 ## Testing
@@ -311,14 +353,14 @@ go test -c -tags integration -o bin/daemon-it.test ./internal/daemon
 sudo SBX_RUNSC="$(which runsc)" SBX_AGENT="$PWD/bin/sbx-agent" bin/daemon-it.test -test.run Integration
 ```
 
-**314 tests** in 17 packages, run under the race detector and also as an unprivileged user. Most
+**342 tests** in 17 packages, run under the race detector and also as an unprivileged user. Most
 use a stand-in backend that runs the real guest agent in-process, with real PTYs and processes, and
 a stand-in `runsc` that keeps state in files and can fail on cue (a busy `state` call, a sandbox
 that won't stop). An in-memory S3 server stands in for the object store, and the store's tests also
-run against a real SeaweedFS when one is configured. **34 integration tests** run against real
+run against a real SeaweedFS when one is configured. **35 integration tests** run against real
 gVisor: lifecycle, adoption after a restart, limits, the memory guard, checkpoint, idle pause and
-wake, fork and clone identity, networking, default deny, the proxy, the browser, MCP, and the
-snapshot store.
+wake, fork and clone identity, networking, default deny, the proxy, the browser, MCP, port
+forwarding, and the snapshot store.
 
 **Crash safety is tested directly.** One test stops the daemon at every point between two writes
 of a checkpoint's save, upload, fetch or delete, then starts a fresh daemon on the same registry,
@@ -368,9 +410,9 @@ sandboxes or 80 with Chromium.
 ## Interfaces
 
 **The CLI** (`sbx`): `create`, `ls`, `info`, `stats`, `events`, `exec`, `put`, `get`, `files`,
-`shell`, `sessions`, `kill-session`, `start`, `ps`, `logs`, `signal`, `wait`, `rmproc`, `extend`,
-`checkpoint`, `checkpoints`, `resume`, `images`, `fork`, `audit`, `rm` and `run`. Run `sbx` alone
-for each one's flags.
+`shell`, `sessions`, `kill-session`, `start`, `ps`, `logs`, `signal`, `wait`, `rmproc`, `ports`,
+`forward`, `extend`, `checkpoint`, `checkpoints`, `resume`, `images`, `fork`, `audit`, `rm` and
+`run`. Run `sbx` alone for each one's flags.
 
 **The HTTP API**, on `/run/sbx/sbxd.sock`:
 
@@ -381,6 +423,7 @@ for each one's flags.
 | `PUT`, `GET /v1/sandboxes/{id}/files` · `GET .../ls` · `GET .../stat` | upload, download, list, describe |
 | `POST /v1/sandboxes/{id}/shell` · `GET .../sessions` · `DELETE .../sessions/{sid}` | open or attach a terminal (HTTP 101), list, end |
 | `POST`, `GET /v1/sandboxes/{id}/processes` and `.../processes/{proc}`, `/signal`, `/wait`, `/logs` | background processes |
+| `GET /v1/sandboxes/{id}/ports` · `POST .../ports/{port}/connect` | what listens inside; a connection to a port (HTTP 101, then the raw TCP stream) |
 | `POST`, `GET /v1/sandboxes/{id}/checkpoints` · `POST .../resume` · `POST .../fork` | checkpoint, list, resume, fork |
 | `GET /v1/sandboxes/{id}/stats` · `GET .../events` | resource use and limits; state history |
 | `GET /v1/audit` · `GET /v1/audit/verify` · `GET /v1/images` · `GET /v1/health` | the audit chain, its check, image versions, health |
@@ -423,10 +466,10 @@ an agent sees.
 | `cmd/sbx-agent` | the guest agent binary |
 | `cmd/sbx-bench` | the benchmark suite |
 | `cmd/sbx-boot` | boots one Firecracker microVM with its console attached |
-| `internal/daemon` | lifecycle, reconciliation, idle, fork, snapshots, network and proxy wiring, the HTTP API |
+| `internal/daemon` | lifecycle, reconciliation, idle, fork, snapshots, network and proxy wiring, port forwarding, the HTTP API |
 | `internal/registry` | the SQLite registry, the state machine, the audit chain |
 | `internal/sandbox` | the backend interface; `gvisor` and `firecracker` implement it |
-| `internal/guest` | the guest agent: exec, files, sessions, processes, identity |
+| `internal/guest` | the guest agent: exec, files, sessions, processes, port tunnels, identity |
 | `internal/agent`, `internal/agentproto` | the daemon's side of the agent connection, and the wire format |
 | `internal/netns`, `internal/proxy` | per-sandbox networking, and the egress proxy |
 | `internal/store`, `internal/s3` | the snapshot store, and the S3 client |
@@ -445,8 +488,6 @@ an agent sees.
 - **Incremental and content-addressed checkpoints.** Write only what changed since the last
   checkpoint, and store files by their hash, so the agent binary every image carries is uploaded
   once rather than with every checkpoint.
-- **Port forwarding,** to open a server an agent started in its sandbox from the host. Next to be
-  built.
 - **Full GUI computer use:** a virtual display with screenshot, mouse and keyboard tools, beyond the
   headless browser.
 - **Secret injection at the proxy:** API keys attached to outbound requests, never present inside
@@ -471,6 +512,9 @@ an agent sees.
   without a sync per write.
 - **Access control is the Unix socket's permissions.** The one parameter that reaches the host, a
   sandbox's root filesystem, is reserved for the daemon's own user. There's no TLS or remote API.
+- **A forwarded port is open to everyone on the host,** as with `ssh -L`: `sbx forward` and
+  `forward_port` listen on 127.0.0.1, which any local user can connect to, not on the socket whose
+  permissions guard the API. `sbx forward -addr 0.0.0.0` opens it to the network as well.
 - **Benchmarked inside a VM,** on one machine.
 
 ## References

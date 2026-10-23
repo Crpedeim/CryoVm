@@ -67,7 +67,7 @@ func (m *Manager) checkpoint(ctx context.Context, id string, req api.CheckpointR
 		return ck, err
 	}
 	if n := m.busyWith(id); n > 0 && !req.Force {
-		return ck, fmt.Errorf("%w: sandbox %s is busy (%d operation(s) in progress: an exec, an attached shell, a followed log); finish them, or force the checkpoint and cut them off",
+		return ck, fmt.Errorf("%w: sandbox %s is busy (%d operation(s) in progress: an exec, an attached shell, a followed log, a forwarded connection); finish them, or force the checkpoint and cut them off",
 			registry.ErrConflict, id, n)
 	}
 	// The transition names the checkpoint it's taking: after a crash,

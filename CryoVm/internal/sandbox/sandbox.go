@@ -141,6 +141,13 @@ type Sandbox interface {
 	Logs(ctx context.Context, procID string, offset int64, follow bool, w io.Writer) (LogsEnd, error)
 	RemoveProcess(ctx context.Context, procID string) error
 
+	// Ports. DialPort connects to a port on the sandbox's own loopback,
+	// through the agent: a server inside is reached whether it listens on
+	// every address or on localhost alone, with or without a network.
+	// Ports lists the TCP sockets listening inside.
+	DialPort(ctx context.Context, port int) (*agent.Tunnel, error)
+	Ports(ctx context.Context) (PortList, error)
+
 	// Stats reports resource use and limits, from the host's side.
 	Stats(ctx context.Context) (Stats, error)
 
@@ -190,6 +197,8 @@ type (
 	ProcInfo       = agentproto.ProcInfo
 	LogsEnd        = agentproto.LogsEnd
 	Reclaimed      = agentproto.Reclaimed
+	PortInfo       = agentproto.PortInfo
+	PortList       = agentproto.PortList
 )
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)

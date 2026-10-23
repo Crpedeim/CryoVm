@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,7 +137,7 @@ func TestMCPProtocol(t *testing.T) {
 			t.Errorf("tool %s has no description", tl.Name)
 		}
 	}
-	if got := strings.Join(names, " "); got != "shell read_file write_file list_files start_process process_logs fork browse sandbox_info" {
+	if got := strings.Join(names, " "); got != "shell read_file write_file list_files start_process process_logs forward_port fork browse sandbox_info" {
 		t.Fatalf("tools: %s", got)
 	}
 	if r := s.call("resources/list", nil); r.Error == nil || r.Error.Code != -32601 {
@@ -418,12 +420,59 @@ func TestMCPDescriptionsWarnAboutTheSurprises(t *testing.T) {
 		"fork":          {"own session"},
 		"browse":        {"-image browser", "metadata", "Playwright script"},
 		"start_process": {"process_logs"},
+		"forward_port":  {"start_process", "URL", "localhost", "not on the internet"},
 	} {
 		for _, m := range must {
 			if !strings.Contains(desc[tool], m) {
 				t.Errorf("%s's description should mention %q", tool, m)
 			}
 		}
+	}
+}
+
+// Showing the user what the agent built: forward_port hands out a URL on
+// this machine that reaches the server inside the sandbox. The web app here
+// already holds its port number on this machine (the stand-in's "sandbox"
+// is this machine), so the URL gets another one: the fallback is exercised.
+func TestMCPForwardPort(t *testing.T) {
+	e := start(t)
+	sb, _ := e.c.Create(tctx(t), api.CreateRequest{ID: "show"})
+	s := startMCP(t, e.c, sb.ID, t.TempDir())
+	port := webApp(t)
+	urlOf := regexp.MustCompile(`http://127\.0\.0\.1:\d+`)
+
+	got, isErr, _ := s.tool("forward_port", map[string]any{"port": port})
+	url := urlOf.FindString(got)
+	if isErr || url == "" || !strings.Contains(got, fmt.Sprintf("Port %d in the sandbox", port)) || strings.Contains(got, "nothing is listening") {
+		t.Fatalf("forward_port: %q", got)
+	}
+	browser := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 10 * time.Second}
+	resp, err := browser.Get(url + "/hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "<h1>made by an agent</h1> GET /hello" {
+		t.Fatalf("the URL: %q", body)
+	}
+	if again, _, _ := s.tool("forward_port", map[string]any{"port": port}); urlOf.FindString(again) != url {
+		t.Fatalf("asked again, a different URL: %q", again)
+	}
+	if info, _, _ := s.tool("sandbox_info", map[string]any{}); !strings.Contains(info, fmt.Sprintf("forwarded: port %d → %s", port, url)) {
+		t.Fatalf("sandbox_info should list the forward: %q", info)
+	}
+
+	// Before the server is up: the URL anyway, and a note saying it can't
+	// show anything yet, with what does listen.
+	free := freePort(t)
+	got, isErr, _ = s.tool("forward_port", map[string]any{"port": free})
+	if isErr || urlOf.FindString(got) == "" || !strings.Contains(got, fmt.Sprintf("nothing is listening on port %d", free)) ||
+		!strings.Contains(got, fmt.Sprintf("Listening now: ")) || !strings.Contains(got, strconv.Itoa(port)) {
+		t.Fatalf("forward_port before the server is up: %q", got)
+	}
+	if got, isErr, _ := s.tool("forward_port", map[string]any{"port": 0}); !isErr || !strings.Contains(got, "between 1 and 65535") {
+		t.Fatalf("port 0: %q", got)
 	}
 }
 

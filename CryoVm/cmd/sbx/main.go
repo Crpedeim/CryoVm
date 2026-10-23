@@ -49,6 +49,8 @@ commands:
   signal <id> <proc> [SIGNAL]                           signal its process group (default TERM)
   wait <id> <proc>                                      wait for it to exit; exits with its code
   rmproc <id> <proc>                                    forget an exited process, delete its logs
+  ports <id>                                            TCP ports listening inside, and their processes
+  forward [-addr IP] <id> [LOCAL:]PORT...               open ports inside on this machine (ssh -L style) until Ctrl+C
   extend <id> <duration>                                set its deadline to duration from now
   checkpoint [-leave-running] [-force] <id>             save its whole state; without -leave-running it's paused
   checkpoints <id>                                      list its checkpoints
@@ -151,6 +153,10 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 			return 2, err
 		}
 		return 0, c.RemoveProcess(ctx, args[0], args[1])
+	case "ports":
+		return 0, ports(ctx, c, args)
+	case "forward":
+		return 0, forward(ctx, c, args)
 	case "rm":
 		return 0, remove(ctx, c, args)
 	case "run":

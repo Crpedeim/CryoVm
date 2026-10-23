@@ -153,6 +153,13 @@ func (s *Sandbox) Logs(context.Context, string, int64, bool, io.Writer) (sandbox
 
 func (s *Sandbox) RemoveProcess(context.Context, string) error { return errNoProcs }
 
+var errNoPorts = fmt.Errorf("firecracker port forwarding needs the vsock agent: %w", sandbox.ErrUnsupported)
+
+func (s *Sandbox) DialPort(context.Context, int) (*agent.Tunnel, error) { return nil, errNoPorts }
+func (s *Sandbox) Ports(context.Context) (sandbox.PortList, error) {
+	return sandbox.PortList{}, errNoPorts
+}
+
 func (s *Sandbox) Stats(context.Context) (sandbox.Stats, error) {
 	return sandbox.Stats{}, fmt.Errorf("firecracker stats come with the jailer's cgroups: %w", sandbox.ErrUnsupported)
 }

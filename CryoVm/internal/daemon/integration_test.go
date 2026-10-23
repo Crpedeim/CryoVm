@@ -12,6 +12,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/Crpedeim/sbx/internal/netns"
 	"github.com/Crpedeim/sbx/internal/proxy"
@@ -1782,4 +1783,108 @@ func TestIntegrationCheckpointNearTheLimit(t *testing.T) {
 	t.Logf("OBSERVED: holding %d of 256 MiB: %d pause-resume rounds, all fine", touched, rounds)
 	n, err := run("buffered", true)
 	t.Logf("OBSERVED: the control, buffered checkpoints: %d of %d rounds; %v", n, rounds, err)
+}
+
+// Port forwarding on real gVisor: servers an agent started in a sandbox
+// with no network at all, reached from the host. One listens on localhost
+// alone, one on IPv6's loopback alone (gVisor's netstack has it whether or
+// not the host does). Both are listed with their processes, from gVisor's
+// own socket tables. Then the sandbox falls asleep, and a request wakes it
+// and is answered by the server restored from its checkpoint.
+func TestIntegrationPortForwarding(t *testing.T) {
+	e := itSetup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	d := e.daemon(t, filepath.Join(e.dir, "a.sock"), func(c *Config) { c.LifetimeEvery = 200 * time.Millisecond })
+	defer d.stop()
+	sb, err := d.c.Create(ctx, api.CreateRequest{IdleTimeoutS: 2, IdleAction: api.IdlePause})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.c.Destroy(ctx, sb.ID)
+	if _, err := d.c.Exec(ctx, sb.ID, client.ExecRequest{Args: []string{"sh", "-c", "mkdir -p /tmp/site && echo made-in-the-sandbox > /tmp/site/index.html"}}); err != nil {
+		t.Fatal(err)
+	}
+	for port, bind := range map[string]string{"8000": "127.0.0.1", "8001": "::1"} {
+		if _, err := d.c.StartProcess(ctx, sb.ID, api.ProcStartRequest{Args: []string{"python3", "-m", "http.server", port, "--bind", bind}, Dir: "/tmp/site"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listens := func(list api.PortList, port int, addr string) bool {
+		for _, p := range list.Ports {
+			if p.Port == port && p.Addr == addr {
+				return true
+			}
+		}
+		return false
+	}
+	var list api.PortList
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		list, err = d.c.Ports(ctx, sb.ID)
+		if err == nil && listens(list, 8000, "127.0.0.1") && listens(list, 8001, "::1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the servers never showed up listening: %+v %v", list, err)
+		}
+	}
+	for _, p := range list.Ports {
+		if p.PID <= 0 || !strings.Contains(p.Command, "http.server") {
+			t.Errorf("gVisor's socket tables should name the process holding each port: %+v", p)
+		}
+	}
+
+	browser := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: time.Minute}
+	forwarded := func(port int) string {
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		go d.c.ServePort(ln, sb.ID, port, nil)
+		return "http://" + ln.Addr().String() + "/"
+	}
+	fetch := func(url string) (string, time.Duration) {
+		start := time.Now()
+		resp, err := browser.Get(url)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return strings.TrimSpace(string(b)), time.Since(start)
+	}
+	url4, url6 := forwarded(8000), forwarded(8001)
+	got, took := fetch(url4)
+	if got != "made-in-the-sandbox" {
+		t.Fatalf("the server on localhost alone: %q", got)
+	}
+	if got, _ := fetch(url6); got != "made-in-the-sandbox" {
+		t.Fatalf("the server on ::1 alone: %q", got)
+	}
+	t.Logf("OBSERVED: a page through the forward, awake: %s", took.Round(time.Millisecond))
+	if _, err := d.c.DialPort(ctx, sb.ID, 9); !errors.Is(err, client.ErrRefused) {
+		t.Fatalf("a port nothing listens on: want ErrRefused, got %v", err)
+	}
+
+	idle := time.Now()
+	for {
+		rec, _ := d.c.Get(ctx, sb.ID)
+		if rec.State == api.Paused {
+			break
+		}
+		if time.Since(idle) > 30*time.Second {
+			t.Fatalf("with no connection open, the sandbox never fell asleep: %s", rec.State)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Logf("OBSERVED: asleep %s after the last request (idle timeout 2 s)", time.Since(idle).Round(100*time.Millisecond))
+	got, took = fetch(url4)
+	if got != "made-in-the-sandbox" {
+		t.Fatalf("after the sandbox slept: %q", got)
+	}
+	if rec, _ := d.c.Get(ctx, sb.ID); rec.State != api.Running {
+		t.Fatalf("the request should have woken it: %s", rec.State)
+	}
+	t.Logf("OBSERVED: a request to the sleeping sandbox woke it, and its restored server answered, in %s", took.Round(time.Millisecond))
 }

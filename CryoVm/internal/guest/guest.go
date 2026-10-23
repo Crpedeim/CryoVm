@@ -21,7 +21,10 @@ import (
 	"github.com/Crpedeim/sbx/internal/agentproto"
 )
 
-const Version = "0.15.0"
+// Version is what the agent says in its hello. The host checks it before
+// asking for anything an older agent wouldn't understand: a sandbox resumed
+// from an image keeps the agent that image was saved with.
+const Version = "0.16.0"
 
 // TrampolineFlag, as the agent binary's first argument, makes it set
 // RLIMIT_NPROC and exec a program instead of running as the agent:
@@ -397,6 +400,26 @@ func session(ctx context.Context, conn net.Conn, cfg Config, procs *procTable, s
 			ok, _ := agentproto.New(agentproto.TypeProcRemoved, m.ID, nil)
 			_ = w.send(ok)
 
+		case agentproto.TypePortOpen:
+			var req agentproto.PortOpen
+			if err := m.Decode(&req); err != nil {
+				sendErr(w, m.ID, agentproto.CodeInvalid, "bad port_open: "+err.Error())
+				continue
+			}
+			id := m.ID
+			// Data under the window, acks for the data sent under the
+			// window, and a few control frames: as for a shell.
+			start(id, 2*agentproto.Window+8, func(ctx context.Context, in <-chan agentproto.Message) {
+				runPort(ctx, id, req, in, w, "/proc")
+			})
+
+		case agentproto.TypePortList:
+			id := m.ID
+			start(id, 0, func(context.Context, <-chan agentproto.Message) {
+				list, _ := agentproto.New(agentproto.TypePortListed, id, listPorts("/proc"))
+				_ = w.send(list)
+			})
+
 		case agentproto.TypeIdentity:
 			var id agentproto.Identity
 			if err := m.Decode(&id); err != nil || id.SandboxID == "" {
@@ -431,7 +454,8 @@ func session(ctx context.Context, conn net.Conn, cfg Config, procs *procTable, s
 			_ = w.send(res)
 
 		case agentproto.TypeWriteChunk, agentproto.TypeWriteClose, agentproto.TypeAck,
-			agentproto.TypePtyIn, agentproto.TypeResize, agentproto.TypeDetach:
+			agentproto.TypePtyIn, agentproto.TypeResize, agentproto.TypeDetach,
+			agentproto.TypePortData, agentproto.TypePortEOF:
 			mu.Lock()
 			t := tasks[m.ID]
 			mu.Unlock()

@@ -30,6 +30,7 @@ var (
 	ErrInvalid     = errors.New("invalid request")
 	ErrForbidden   = errors.New("forbidden")
 	ErrUnsupported = errors.New("unsupported")
+	ErrRefused     = errors.New("connection refused") // nothing listens on the port inside
 )
 
 type APIError struct {
@@ -52,6 +53,8 @@ func (e *APIError) Unwrap() error {
 		return ErrForbidden
 	case api.CodeUnsupported:
 		return ErrUnsupported
+	case api.CodeRefused:
+		return ErrRefused
 	}
 	return nil
 }
@@ -59,19 +62,22 @@ func (e *APIError) Unwrap() error {
 type Client struct {
 	http *http.Client
 	base string
+	dial func(ctx context.Context) (net.Conn, error) // a new connection to the daemon
 }
 
 // New returns a client for the daemon listening on the Unix socket sock.
 // There is no overall timeout: exec and file transfers can legitimately
 // run for a long time. Use the context to bound a call.
 func New(sock string) *Client {
+	dial := func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}
 	return &Client{
 		base: "http://sbxd", // the host is a placeholder; every request goes to sock
+		dial: dial,
 		http: &http.Client{Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", sock)
-			},
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
 		}},
 	}
 }

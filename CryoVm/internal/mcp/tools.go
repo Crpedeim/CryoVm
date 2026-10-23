@@ -7,7 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,15 +32,23 @@ type Sandbox struct {
 	WorkDir string
 
 	mu       sync.Mutex
-	saved    int  // how many long outputs were saved to files
-	helperUp bool // browse's helper is in the sandbox
+	saved    int                  // how many long outputs were saved to files
+	helperUp bool                 // browse's helper is in the sandbox
+	forwards map[int]net.Listener // forward_port's, by port inside: open until the session ends
 }
 
 func NewSandbox(c *client.Client, id string) *Sandbox {
-	return &Sandbox{c: c, id: id, sh: &shell{c: c, sandbox: id}, WorkDir: "/tmp/.sbx-mcp"}
+	return &Sandbox{c: c, id: id, sh: &shell{c: c, sandbox: id}, WorkDir: "/tmp/.sbx-mcp", forwards: map[int]net.Listener{}}
 }
 
-func (s *Sandbox) Close() { s.sh.Close() }
+func (s *Sandbox) Close() {
+	s.sh.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ln := range s.forwards {
+		ln.Close()
+	}
+}
 
 const (
 	maxText  = 20000 // bytes of text a result carries
@@ -48,7 +59,8 @@ func (s *Sandbox) Instructions() string {
 	return fmt.Sprintf("These tools act inside one sandbox, %s: an isolated Linux machine (gVisor). "+
 		"shell keeps its working directory and variables between calls. "+
 		"Long outputs are cut to their beginning and end; the full text is saved in a file you can page through with read_file. "+
-		"Network access, if any, goes through an egress proxy that may refuse destinations.", s.id)
+		"Network access, if any, goes through an egress proxy that may refuse destinations. "+
+		"To show the user a web app or any other server you run in the sandbox, use forward_port: it gives them a URL to open on their machine.", s.id)
 }
 
 func schema(props map[string]any, required ...string) map[string]any {
@@ -114,6 +126,14 @@ func (s *Sandbox) Tools() []Tool {
 				"offset":     intIn("Byte offset to start at (default 0).", 0, 1<<62),
 				"limit":      intIn("Bytes to return (default 20000).", 1, 100000),
 			}, "process_id")},
+		{"forward_port", "Show the user something you built that runs as a server in the sandbox (a web app, an API, " +
+			"generated docs): this makes the server's port reachable on the user's machine and returns the URL to give " +
+			"them, like http://127.0.0.1:8000. Start the server first, with start_process; it may listen on localhost or " +
+			"on every address, and the sandbox needs no network for this. The URL works for the rest of this session, " +
+			"waking the sandbox if it has gone to sleep. It's on the user's own machine only, not on the internet.",
+			schema(map[string]any{
+				"port": intIn("The port the server listens on inside the sandbox.", 1, 65535),
+			}, "port")},
 		{"fork", "Copy this sandbox as it is right now (files, installed packages, running processes) into new " +
 			"sandboxes, to try alternatives side by side from the same starting point. Returns their IDs. Your " +
 			"session stays in this sandbox; each copy needs its own session (another sbx-mcp started with -sandbox " +
@@ -153,6 +173,7 @@ func (s *Sandbox) Call(ctx context.Context, name string, raw json.RawMessage) Re
 		Count      int    `json:"count"`
 		URL        string `json:"url"`
 		Screenshot bool   `json:"screenshot"`
+		Port       int    `json:"port"`
 	}
 	var withContent struct {
 		Content *string `json:"content"`
@@ -178,6 +199,8 @@ func (s *Sandbox) Call(ctx context.Context, name string, raw json.RawMessage) Re
 		return s.startProcess(ctx, a.Command, a.Cwd)
 	case "process_logs":
 		return s.processLogs(ctx, a.ProcessID, a.Offset, a.Limit)
+	case "forward_port":
+		return s.forwardPort(ctx, a.Port)
 	case "fork":
 		return s.fork(ctx, a.Count)
 	case "browse":
@@ -555,5 +578,77 @@ func (s *Sandbox) info(ctx context.Context) Result {
 	if sb.ForkedFrom != "" {
 		fmt.Fprintf(&b, "forked from: %s\n", sb.ForkedFrom)
 	}
+	s.mu.Lock()
+	ports := make([]int, 0, len(s.forwards))
+	for p := range s.forwards {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	for _, p := range ports {
+		fmt.Fprintf(&b, "forwarded: port %d → http://%s\n", p, s.forwards[p].Addr())
+	}
+	s.mu.Unlock()
 	return textResult(b.String())
+}
+
+// forwardPort serves a port inside the sandbox on this machine, for the
+// user to open: what sbx forward does, for as long as the session lasts. The
+// same port number here if it's free, so the address the server announces
+// is the one to open; any free port if it isn't.
+func (s *Sandbox) forwardPort(ctx context.Context, port int) Result {
+	if port < 1 || port > 65535 {
+		return errResult("forward_port needs the port the server listens on inside the sandbox, between 1 and 65535")
+	}
+	note := s.notListening(ctx, port) // what's inside as asked, before anything here changes
+	s.mu.Lock()
+	ln := s.forwards[port]
+	if ln == nil {
+		var err error
+		if ln, err = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
+			ln, err = net.Listen("tcp4", "127.0.0.1:0")
+		}
+		if err != nil {
+			s.mu.Unlock()
+			return errResult("opening a port on this machine to forward from: %v", err)
+		}
+		s.forwards[port] = ln
+		go func() { _ = s.c.ServePort(ln, s.id, port, nil) }()
+	}
+	s.mu.Unlock()
+	text := fmt.Sprintf("Port %d in the sandbox is at http://%s on the user's machine: give them that URL to open in a browser. "+
+		"It works for the rest of this session, and wakes the sandbox if it sleeps.", port, ln.Addr())
+	if note != "" {
+		text += " " + note
+	}
+	return textResult(text)
+}
+
+// notListening says so when nothing listens on port inside yet, and what
+// does: the URL is handed out either way, but it can't show anything yet.
+func (s *Sandbox) notListening(ctx context.Context, port int) string {
+	list, err := s.c.Ports(ctx, s.id)
+	if err != nil {
+		return ""
+	}
+	seen := map[int]bool{}
+	var others []string
+	for _, p := range list.Ports {
+		if p.Port == port {
+			return ""
+		}
+		if !seen[p.Port] {
+			seen[p.Port] = true
+			if p.Command != "" {
+				others = append(others, fmt.Sprintf("%d (%s)", p.Port, p.Command))
+			} else {
+				others = append(others, strconv.Itoa(p.Port))
+			}
+		}
+	}
+	note := fmt.Sprintf("But nothing is listening on port %d inside the sandbox yet, so for now the page only says that: "+
+		"start the server (start_process), and the URL shows it once it listens.", port)
+	if len(others) > 0 {
+		note += " Listening now: " + strings.Join(others, "; ") + "."
+	}
+	return note
 }

@@ -14,7 +14,7 @@ import (
 	"github.com/Crpedeim/sbx/internal/guest"
 )
 
-func sockPath(t *testing.T) string {
+func sockPath(t testing.TB) string {
 	t.Helper()
 	// Unix socket paths are limited to ~108 bytes; t.TempDir() can be long.
 	dir, err := os.MkdirTemp("", "sbx")
@@ -26,13 +26,13 @@ func sockPath(t *testing.T) string {
 }
 
 // startGuest runs the real guest agent loop in-process, dialing path.
-func startGuest(t *testing.T, id, path string) context.CancelFunc {
+func startGuest(t testing.TB, id, path string) context.CancelFunc {
 	return startGuestWith(t, id, path, nil)
 }
 
 // startGuestWith lets a test adjust the agent's config. Background
 // processes log to a temporary directory, never to the host's /var/log.
-func startGuestWith(t *testing.T, id, path string, adjust func(*guest.Config)) context.CancelFunc {
+func startGuestWith(t testing.TB, id, path string, adjust func(*guest.Config)) context.CancelFunc {
 	t.Helper()
 	cfg := guest.Config{
 		SandboxID: id, Dial: "unix:" + path,
@@ -51,14 +51,14 @@ func startGuestWith(t *testing.T, id, path string, adjust func(*guest.Config)) c
 	return func() { cancel(); <-done }
 }
 
-func wait(t *testing.T) context.Context {
+func wait(t testing.TB) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }
 
 // longWait is for operations that move a lot of data.
-func longWait(t *testing.T) context.Context {
+func longWait(t testing.TB) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	return ctx

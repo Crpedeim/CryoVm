@@ -102,6 +102,22 @@ const (
 	// publishes the new generation to programs, and acknowledges.
 	TypeIdentity    = "identity"     // host → agent
 	TypeIdentityAck = "identity_ack" // agent → host
+
+	// A port tunnel is one request ID carrying a TCP connection that the
+	// agent opens to a port on the sandbox's own loopback: how a server
+	// started inside is reached from the host, with or without a network.
+	// Bytes flow both ways under the same credit window as a shell (each
+	// port_data is acked once delivered). Either side ends its direction
+	// with port_eof, TCP's half-close, and the agent ends the tunnel with
+	// exactly one final frame: port_closed once both directions have ended,
+	// or error. The host may send cancel to drop the connection at once.
+	TypePortOpen   = "port_open"   // host → agent: connect to a port inside
+	TypePortReady  = "port_ready"  // agent → host: connected; which address answered
+	TypePortData   = "port_data"   // either way: bytes (acked like chunks)
+	TypePortEOF    = "port_eof"    // either way: no more bytes this way
+	TypePortClosed = "port_closed" // agent → host: both ways have ended
+	TypePortList   = "port_list"   // host → agent: which TCP ports something listens on
+	TypePortListed = "port_listed" // agent → host
 )
 
 const (
@@ -126,6 +142,7 @@ const (
 	CodeInvalid    = "invalid"
 	CodeCanceled   = "canceled"
 	CodeConflict   = "conflict" // right request, wrong state (e.g. removing a running process)
+	CodeRefused    = "refused"  // nothing listens on the port a tunnel asked for
 	CodeIO         = "io"
 )
 
@@ -429,4 +446,36 @@ type Identity struct {
 type IdentityAck struct {
 	Previous string `json:"previous"`
 	Identity
+}
+
+// PortOpen asks for a connection to Port inside the sandbox, on its
+// loopback: a server listening on every address and one listening on
+// localhost alone are reached the same way. Failing that, the agent tries
+// the address a listening socket on Port is bound to.
+type PortOpen struct {
+	Port int `json:"port"`
+}
+
+// PortReady says which address answered: 127.0.0.1; ::1, for a server
+// listening on IPv6's loopback alone; or the one address a server is bound
+// to.
+type PortReady struct {
+	Addr string `json:"addr"`
+}
+
+// PortChunk is the most data one port_data frame carries.
+const PortChunk = 32 << 10
+
+// PortInfo is one TCP socket listening inside the sandbox, and the process
+// holding it, when the agent can tell.
+type PortInfo struct {
+	Port    int    `json:"port"`
+	Addr    string `json:"addr"` // what it's bound to; 0.0.0.0 and :: mean every address
+	PID     int    `json:"pid,omitempty"`
+	Command string `json:"command,omitempty"`
+}
+
+type PortList struct {
+	Ports     []PortInfo `json:"ports"`
+	Truncated bool       `json:"truncated,omitempty"`
 }

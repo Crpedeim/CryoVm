@@ -317,6 +317,24 @@ func (s *fakeSandbox) RemoveProcess(ctx context.Context, id string) error {
 	return c.RemoveProcess(ctx, id)
 }
 
+// DialPort in the fake reaches this machine's own loopback: the agent runs
+// here, so a test's listener stands in for a server inside the sandbox.
+func (s *fakeSandbox) DialPort(ctx context.Context, port int) (*agent.Tunnel, error) {
+	c, err := s.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.DialPort(ctx, port)
+}
+
+func (s *fakeSandbox) Ports(ctx context.Context) (sandbox.PortList, error) {
+	c, err := s.conn(ctx)
+	if err != nil {
+		return sandbox.PortList{}, err
+	}
+	return c.Ports(ctx)
+}
+
 // Checkpoint in the fake writes a stand-in image and, unless left running,
 // ends the sandbox the way runsc stops a checkpointed one.
 func (s *fakeSandbox) Checkpoint(ctx context.Context, opts sandbox.CheckpointOptions) (sandbox.CheckpointResult, error) {

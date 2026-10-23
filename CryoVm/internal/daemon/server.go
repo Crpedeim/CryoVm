@@ -56,6 +56,8 @@ func NewHandler(m *Manager) http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/processes/{proc}/wait", h.waitProcess)
 	mux.HandleFunc("GET /v1/sandboxes/{id}/processes/{proc}/logs", h.processLogs)
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}/processes/{proc}", h.removeProcess)
+	mux.HandleFunc("GET /v1/sandboxes/{id}/ports", h.listPorts)
+	mux.HandleFunc("POST /v1/sandboxes/{id}/ports/{port}/connect", h.connectPort)
 	return mux
 }
 
@@ -82,8 +84,10 @@ func classify(err error) (int, string) {
 		return http.StatusBadRequest, api.CodeInvalid
 	case errors.Is(err, agent.ErrReadOnly), errors.Is(err, agent.ErrPermission):
 		return http.StatusForbidden, api.CodeForbidden
-	case errors.Is(err, sandbox.ErrUnsupported):
+	case errors.Is(err, sandbox.ErrUnsupported), errors.Is(err, agent.ErrUnsupported):
 		return http.StatusNotImplemented, api.CodeUnsupported
+	case errors.Is(err, agent.ErrRefused):
+		return http.StatusBadGateway, api.CodeRefused
 	case errors.Is(err, agent.ErrChecksum):
 		return http.StatusBadGateway, api.CodeChecksum
 	case errors.Is(err, context.DeadlineExceeded):

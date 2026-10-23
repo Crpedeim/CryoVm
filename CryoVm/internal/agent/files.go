@@ -25,7 +25,12 @@ var (
 	ErrChecksum   = errors.New("checksum mismatch")
 	ErrInvalid    = errors.New("invalid request")
 	ErrIO         = errors.New("i/o error")
-	ErrConflict   = errors.New("conflict") // e.g. removing a process that's still running
+	ErrConflict   = errors.New("conflict")           // e.g. removing a process that's still running
+	ErrRefused    = errors.New("connection refused") // nothing listens on the port a tunnel asked for
+
+	// ErrUnsupported means the sandbox's agent is too old for what was
+	// asked: a sandbox keeps the agent it was created with.
+	ErrUnsupported = errors.New("not supported by this sandbox's agent")
 )
 
 var codeErrors = map[string]error{
@@ -39,6 +44,7 @@ var codeErrors = map[string]error{
 	agentproto.CodeInvalid:    ErrInvalid,
 	agentproto.CodeCanceled:   context.Canceled,
 	agentproto.CodeConflict:   ErrConflict,
+	agentproto.CodeRefused:    ErrRefused,
 }
 
 // FileError is a failure reported by the agent for one path.
