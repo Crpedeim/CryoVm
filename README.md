@@ -1,4 +1,4 @@
-# sbx
+# CryoVm
 
 A persistent, sandboxed computer for AI agents, written from scratch in Go.
 
