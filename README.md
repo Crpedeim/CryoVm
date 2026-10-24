@@ -15,6 +15,12 @@ per sandbox, what may be reached, and records every decision in a tamper-evident
 Isolation comes from **gVisor** by default, behind an interface that also takes a Firecracker
 backend.
 
+**Demo:** the sandbox driven from the terminal with `sbx`: a shell that survives disconnects, a
+checkpoint and resume, a fork, the egress policy, and a web page served from inside the sandbox,
+opened in a browser, that wakes the sandbox after it has fallen asleep.
+
+[![Watch the demo on YouTube](https://img.youtube.com/vi/uKVH_-AhlTw/hqdefault.jpg)](https://youtu.be/uKVH_-AhlTw)
+
 **Measured results** (all through the daemon's API; [method and caveats](#benchmarks))
 
 - **A paused sandbox resumes from S3 in 86 ms** (p50), image downloaded and checksum-verified,
@@ -49,8 +55,11 @@ with `python3` in it, at `/mnt/sbx/rootfs/ubuntu-24.04`. (Development used the U
 squashfs image that Firecracker's CI publishes, unpacked with `unsquashfs -d`.) The daemon runs as
 root; you don't.
 
+The code lives in the repository's `CryoVm/` folder, and its programs are named `sbx`; every path
+below except `docs/` is relative to that folder.
+
 ```bash
-git clone https://github.com/Crpedeim/sbx && cd sbx
+git clone https://github.com/Crpedeim/CryoVm && cd CryoVm/CryoVm
 CGO_ENABLED=0 go build -o bin/sbx-agent ./cmd/sbx-agent    # static: it runs inside sandboxes
 CGO_ENABLED=0 go build -o bin/sbx ./cmd/sbx
 CGO_ENABLED=0 go build -o bin/sbx-mcp ./cmd/sbx-mcp
@@ -71,7 +80,7 @@ sbx shell $S                             # an interactive shell; Ctrl+] detaches
 sbx start $S -- sh -c 'i=0; while :; do i=$((i+1)); echo $i; sleep 1; done'
 sbx start $S -- python3 -m http.server 8000   # a web server, as an agent would start one
 sbx ports $S                             # what listens inside, and which process
-sbx forward $S 8000                      # open http://127.0.0.1:8000 here; Ctrl+C stops forwarding
+sbx forward $S 8000                      # (a second terminal) http://127.0.0.1:8000 here, until Ctrl+C
 sbx checkpoint $S                        # paused: its whole state saved, nothing running
 sbx resume $S                            # the counter carries on where it was
 sbx fork -count 3 $S                     # three running copies; prints their IDs
@@ -79,7 +88,7 @@ sbx audit -verify                        # check the audit chain
 ```
 
 **Give an agent its own computer.** One command makes it available to Claude Code; the sandbox is
-created the first time and reused after, sleeping when idle and waking when used:
+created the first time and reused after:
 
 ```bash
 claude mcp add sbx -- /usr/local/bin/sbx-mcp -sandbox agent -create -image browser
@@ -87,6 +96,11 @@ claude mcp add sbx -- /usr/local/bin/sbx-mcp -sandbox agent -create -image brows
 
 (Without a browser image, use `-net` instead of `-image browser`.) When the agent builds something
 with a web interface, its `forward_port` tool hands it a URL on your machine to give you.
+
+To have it sleep when idle and wake when used, give the sandbox an idle timeout: create it yourself
+first, and `sbx-mcp` binds to it by name (`sbx create -id agent -net -idle 15m -idle-action pause`),
+or set a default for every sandbox by adding `-idle 15m` to `SBXD_FLAGS` in `/etc/sbx/sbxd.env` and
+restarting `sbxd`. Without one, `sbxd`'s default is never to pause.
 
 ## Architecture
 
@@ -97,8 +111,7 @@ MCP server an agent talks to: it runs as the user, reaches the daemon through th
 and is bound to one sandbox for its whole session. Inside every sandbox, a **guest agent** runs as
 PID 1 and does what the daemon asks.
 
-Each part of the system has a diagram, at the start of the section that explains it:
-
+The main parts of the system each have a diagram, at the start of the section that explains them.
 
 ### Isolation: why gVisor
 
@@ -347,8 +360,11 @@ lasts for the session; if nothing listens on the port yet, it says so and names 
 
 ## Testing
 
+From `CryoVm/`:
+
 ```bash
 go test -race ./...                                                  # unit and component tests
+CGO_ENABLED=0 go build -o bin/sbx-agent ./cmd/sbx-agent              # integration tests, as root:
 go test -c -tags integration -o bin/daemon-it.test ./internal/daemon
 sudo SBX_RUNSC="$(which runsc)" SBX_AGENT="$PWD/bin/sbx-agent" bin/daemon-it.test -test.run Integration
 ```
@@ -377,7 +393,8 @@ what it was meant to, wherever it runs.
 ## Benchmarks
 
 Full results, every sample's summary and the machine's conditions:
-[docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md). Run them with `sudo bin/sbx-bench`.
+[docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md). Run them from `CryoVm/`, with `sbx`
+installed: `go build -o bin/sbx-bench ./cmd/sbx-bench && sudo bin/sbx-bench -out bench-results`.
 
 > **Measured on one machine**: an AMD Ryzen 5 9600X with 6 CPUs and 23 GB of memory, **itself a
 > VirtualBox VM**, so gVisor ran nested; Linux 7.0, `runsc` release-20261005.0 on systrap,
@@ -458,6 +475,8 @@ an agent sees.
 
 ## Repository layout
 
+Paths are inside `CryoVm/`, except `docs/`, at the repository's root.
+
 | Path | What it is |
 |---|---|
 | `cmd/sbxd` | the daemon |
@@ -477,7 +496,7 @@ an agent sees.
 | `internal/client`, `internal/api` | the Go client and the shared types |
 | `internal/vm`, `internal/fc` | Firecracker's process and API |
 | `scripts/` | install, local S3, image builds, `mcp-try.py` |
-| `docs/` | the diagrams and their generator, and the benchmark results |
+| `docs/` | the diagrams, and the benchmark results |
 
 ## Designed, not built
 
